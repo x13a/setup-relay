@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 set -eEuo pipefail
 trap 'echo "error: $BASH_COMMAND on line $LINENO" >&2' ERR
@@ -25,32 +25,55 @@ configure_system() {
 }
 
 install_deps() {
-    if command -v netfilter-persistent &>/dev/null; then
-        return 0;
+    local deps=()
+    if ! command -v netfilter-persistent &>/dev/null; then
+        deps+=(iptables-persistent)
     fi
-    echo "[*] installing iptables-persistent"
+    if ! command -v dig &>/dev/null; then
+        deps+=(dnsutils)
+    fi
+    (( ${#deps[@]} == 0 )) && return 0
+    echo "[*] installing ${deps[*]}"
     sudo apt-get update
-    sudo apt-get install -y iptables-persistent
-    echo "[+] iptables-persistent installed"
+    sudo apt-get install -y "${deps[@]}"
+    echo "[+] dependencies installed"
 }
 
 get_dest_ip() {
-    local ip
+    local dest ip
     while true; do
-        read -rp "[?] enter destination ip: " ip
-        if is_valid_ip "$ip"; then
-            VARS[dest_ip]="$ip"
+        read -rp "[?] enter destination ip or domain: " dest
+        if resolve_dest "$dest"; then
+            ip="${VARS[dest_ip]}"
+            if [[ "$dest" != "$ip" ]]; then
+                echo "[+] resolved $dest to $ip"
+            fi
             break
         fi
-        echo "[-] invalid ip address"
+        echo "[-] invalid destination"
     done
+}
+
+resolve_dest() {
+    local dest="$1"
+    [[ -n "$dest" ]] || return 1
+    if is_domain "$dest"; then
+        local ips
+        ips=$(dig +short +tries=1 "$dest" A "$dest" AAAA) || return 1
+        local ip
+        while IFS= read -r ip; do
+            { [[ -z "$ip" ]] || is_domain "$ip"; } && continue
+            check_ip "$ip" && return 0
+        done <<< "$ips"
+    fi
+    check_ip "$dest"
 }
 
 get_dest_port() {
     local port
     while true; do
         read -rp "[?] enter destination port: " port
-        if [[ "$port" =~ ^[0-9]+$ ]] && ((port > 0 && port <= 65535)); then
+        if [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 )); then
             VARS[dest_port]="$port"
             break
         fi
@@ -70,19 +93,26 @@ get_dest_proto() {
     VARS[dest_proto]="$proto"
 }
 
-is_valid_ip() {
+check_ip() {
     local ip="$1"
-    if ip route get "$ip" &>/dev/null; then
+    local opt
+    for opt in 4 6; do
+        ip -"$opt" route get "$ip" &>/dev/null || continue
+        VARS[dest_ip]="$ip"
         return 0
-    fi
-    if ip -6 route get "$ip" &>/dev/null; then
-        return 0
-    fi
+    done
     return 1
 }
 
 is_ipv6() {
     [[ "$1" == *:* ]]
+}
+
+is_domain() {
+    local label='[[:alnum:]]([[:alnum:]-]*[[:alnum:]])?'
+    local tld="([[:alpha:]]{2,}|[xX][nN]--${label})"
+    local pattern="^(${label}\.)+${tld}\.?$"
+    [[ "$1" =~ $pattern ]]
 }
 
 setup_iptables() {
@@ -98,16 +128,32 @@ setup_iptables() {
         cmd="iptables"
         dst="$ip:$port"
     fi
-    sudo $cmd -t nat -A PREROUTING \
+    add_iptables_rule "$cmd" filter FORWARD \
+        -m conntrack --ctstate RELATED,ESTABLISHED \
+        -j ACCEPT
+    add_iptables_rule "$cmd" nat PREROUTING \
         -p "$proto" --dport "$port" \
+        -m addrtype --dst-type LOCAL \
         -j DNAT --to-destination "$dst"
-    sudo $cmd -t nat -A POSTROUTING \
+    add_iptables_rule "$cmd" nat POSTROUTING \
         -p "$proto" -d "$ip" --dport "$port" \
+        -m conntrack --ctstate DNAT \
         -j MASQUERADE
-    sudo $cmd -A FORWARD \
+    add_iptables_rule "$cmd" filter FORWARD \
         -p "$proto" -d "$ip" --dport "$port" \
+        -m conntrack --ctstate DNAT \
         -j ACCEPT
     echo "[+] iptables relay setted"
+}
+
+add_iptables_rule() {
+    local cmd="$1"
+    local table="$2"
+    local chain="$3"
+    shift 3
+    if ! sudo "$cmd" -t "$table" -C "$chain" "$@"; then
+        sudo "$cmd" -t "$table" -A "$chain" "$@"
+    fi
 }
 
 save_iptables() {
@@ -129,7 +175,7 @@ main() {
     get_dest_proto
     setup_iptables
     save_iptables
-    echo "[*] done"
+    echo "[+] done"
 }
 
 main "$@"

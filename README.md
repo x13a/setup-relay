@@ -4,22 +4,28 @@ This repository contains an automated **relay setup** script.
 
 ## Requirements
 
-- Ubuntu 22.04/24.04 with `sudo` available.
+- Ubuntu 24.04/26.04 with `sudo` available.
 
 ## Usage
 
-Clone the repo and switch into it:
+Clone repo:
 
 ```sh
 git clone https://github.com/x13a/setup-relay
 cd setup-relay
 ```
 
-Run the setup:
+Run setup:
 
 ```sh
 ./setup.sh
 ```
+
+Enter a destination IPv4 address, IPv6 address, or domain name, then the port
+and protocol.
+
+The resolved IP is saved in the firewall rules; DNS changes are not tracked
+automatically. If the IP changes, remove the old relay rules and run setup again.
 
 ## License
 
